@@ -15,6 +15,7 @@ struct DiscoveredDevice: Identifiable, Equatable {
     let name: String
     let peripheral: CBPeripheral
     let rssi: Int
+    let isSonyCamera: Bool
     
     static func == (lhs: DiscoveredDevice, rhs: DiscoveredDevice) -> Bool {
         return lhs.id == rhs.id
@@ -44,6 +45,9 @@ class BluetoothManager: NSObject, ObservableObject {
     private let cmdShutterReleased: UInt16 = 0x0601
     
     private let lastConnectedDeviceKey = "lastConnectedDeviceUUID"
+    
+    // Sony Camera Manufacturer Data Prefix (from C++ reference: CAMERA_MANUFACTURER_LOOKUP)
+    private let sonyManufacturerDataPrefix: Data = Data([0x2D, 0x01, 0x03, 0x00])
     
     override init() {
         super.init()
@@ -156,10 +160,28 @@ extension BluetoothManager: CBCentralManagerDelegate {
     
     func centralManager(_ central: CBCentralManager, didDiscover peripheral: CBPeripheral, advertisementData: [String : Any], rssi RSSI: NSNumber) {
         let name = peripheral.name ?? advertisementData[CBAdvertisementDataLocalNameKey] as? String ?? "Unknown"
-        let device = DiscoveredDevice(id: peripheral.identifier, name: name, peripheral: peripheral, rssi: RSSI.intValue)
+        
+        var isSony: Bool = false
+        if let manufacturerData = advertisementData[CBAdvertisementDataManufacturerDataKey] as? Data {
+            if manufacturerData.starts(with: sonyManufacturerDataPrefix) {
+                isSony = true
+                print("Discovered a Sony Camera: \(name)")
+            }
+        }
+        
+        // Filter: Only show Sony cameras
+        guard isSony else {
+            print("Discovered non-Sony device: \(name)")
+            return // Skip non-Sony devices
+        }
+        
+        let device = DiscoveredDevice(id: peripheral.identifier, name: name, peripheral: peripheral, rssi: RSSI.intValue, isSonyCamera: isSony)
         
         if !discoveredDevices.contains(where: { $0.id == device.id }) {
             discoveredDevices.append(device)
+            // Sort the devices, Sony devices will naturally be at the top if we had other types
+            // For now, just sort by name within the filtered list.
+            discoveredDevices.sort { $0.name < $1.name }
         }
     }
     

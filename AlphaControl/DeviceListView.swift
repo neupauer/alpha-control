@@ -2,6 +2,7 @@ import SwiftUI
 
 struct DeviceListView: View {
     @ObservedObject var bluetoothManager: BluetoothManager
+    @State private var isShowingConnectionSheet = false
     
     var body: some View {
         NavigationView {
@@ -14,6 +15,7 @@ struct DeviceListView: View {
                         ForEach(bluetoothManager.discoveredDevices) { device in
                             Button(action: {
                                 bluetoothManager.connect(to: device)
+                                isShowingConnectionSheet = true
                             }) {
                                 HStack {
                                     Text(device.name)
@@ -44,6 +46,20 @@ struct DeviceListView: View {
             }
             .onAppear {
                 bluetoothManager.startScanning()
+            }
+            .sheet(isPresented: $isShowingConnectionSheet) {
+                ConnectionStatusSheetView(bluetoothManager: bluetoothManager)
+            }
+            .onChange(of: bluetoothManager.connectionStatus) { newStatus in
+                // Automatically dismiss the sheet if connected, or after a delay if disconnected/error
+                if newStatus == .connected {
+                    isShowingConnectionSheet = false // ContentView will handle navigation
+                } else if newStatus == .disconnected || newStatus == .error {
+                    // Give user time to see the status, then dismiss
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
+                        isShowingConnectionSheet = false
+                    }
+                }
             }
         }
     }
