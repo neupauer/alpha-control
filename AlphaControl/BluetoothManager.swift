@@ -49,35 +49,13 @@ class BluetoothManager: NSObject, ObservableObject {
     // Sony Camera Manufacturer Data Prefix (from C++ reference: CAMERA_MANUFACTURER_LOOKUP)
     private let sonyManufacturerDataPrefix: Data = Data([0x2D, 0x01, 0x03, 0x00])
     
-    // Async Continuation for status waiting
-    private var statusContinuation: CheckedContinuation<Void, Error>?
-    private var waitingForCondition: (type: UInt8, value: UInt8)?
+    // State for Focus/Capture logic
+    private var isFocusLocked: Bool = false
+    private var pendingCapture: Bool = false
     
     override init() {
         super.init()
         centralManager = CBCentralManager(delegate: self, queue: nil)
-    }
-    
-    // ... (Scan methods remain here)
-
-    private func waitForStatus(type: UInt8, value: UInt8, timeout: TimeInterval) async throws {
-        // Set the condition we are waiting for
-        self.waitingForCondition = (type, value)
-        
-        // Use a throwing continuation to wait
-        try await withCheckedThrowingContinuation { continuation in
-            self.statusContinuation = continuation
-            
-            // Timeout logic
-            Task {
-                try? await Task.sleep(nanoseconds: UInt64(timeout * 1_000_000_000))
-                if self.statusContinuation != nil {
-                    self.statusContinuation?.resume(throwing: NSError(domain: "Timeout", code: -1, userInfo: nil))
-                    self.statusContinuation = nil
-                    self.waitingForCondition = nil
-                }
-            }
-        }
     }
     
     func startScanning() {
@@ -118,49 +96,79 @@ class BluetoothManager: NSObject, ObservableObject {
         // so they can easily reconnect later.
     }
     
-    func triggerShutter() {
+    // MARK: - Camera Actions
+    
+    func startFocus() {
         guard let peripheral = connectedPeripheral, let characteristic = commandCharacteristic else {
             statusMessage = "Not connected"
             return
         }
         
+        print("Start Focus")
+        isFocusLocked = false
+        pendingCapture = false
+        statusMessage = "Focusing..."
+        
         Task {
-            do {
-                // Sequence: Focus -> Capture -> Release
-                
-                // 1. Press to Focus
-                await sendCommand(cmdPressToFocus, to: peripheral, characteristic: characteristic)
-                DispatchQueue.main.async { self.statusMessage = "Focusing..." }
-                
-                // Wait for Focus Acquired (0x3F, 0x20)
-                try await waitForStatus(type: 0x3F, value: 0x20, timeout: 3.0)
-                
-                // 2. Take Picture
-                await sendCommand(cmdTakePicture, to: peripheral, characteristic: characteristic)
-                DispatchQueue.main.async { self.statusMessage = "Capturing..." }
-                
-                // Wait for Shutter Active (0xA0, 0x20)
-                try await waitForStatus(type: 0xA0, value: 0x20, timeout: 3.0)
-                
-                // 3. Hold Focus (Release shutter button but keep focus? Reference does this)
-                await sendCommand(cmdHoldFocus, to: peripheral, characteristic: characteristic)
-                
-                // 4. Release Everything
-                await sendCommand(cmdShutterReleased, to: peripheral, characteristic: characteristic)
-                
-                DispatchQueue.main.async {
-                    self.statusMessage = "Ready"
+            await sendCommand(cmdPressToFocus, to: peripheral, characteristic: characteristic)
+        }
+    }
+    
+    func finishCapture() {
+        guard let peripheral = connectedPeripheral, let characteristic = commandCharacteristic else { return }
+        print("Finish Capture requested")
+        
+        if isFocusLocked {
+            print("Focus is locked, capturing immediately.")
+            performCapture(peripheral: peripheral, characteristic: characteristic)
+        } else {
+            print("Focus not locked yet. Pending capture...")
+            statusMessage = "Waiting for focus..."
+            pendingCapture = true
+            
+            // Timeout safety: If focus never locks, cancel pending capture after 3s
+            DispatchQueue.main.asyncAfter(deadline: .now() + 3.0) { [weak self] in
+                guard let self = self else { return }
+                if self.pendingCapture {
+                    print("Capture timed out waiting for focus.")
+                    self.statusMessage = "Focus Timeout"
+                    self.pendingCapture = false
+                    self.cancelCapture()
                 }
-            } catch {
-                print("Trigger failed or timed out: \(error)")
-                DispatchQueue.main.async {
-                    self.statusMessage = "Error/Timeout"
-                }
-                // Attempt to release anyway to reset camera state
-                await sendCommand(cmdShutterReleased, to: peripheral, characteristic: characteristic)
-                DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
-                     self.statusMessage = "Ready"
-                }
+            }
+        }
+    }
+    
+    private func performCapture(peripheral: CBPeripheral, characteristic: CBCharacteristic) {
+        pendingCapture = false
+        statusMessage = "Capturing..."
+        
+        Task {
+            // 1. Take Picture
+            await sendCommand(cmdTakePicture, to: peripheral, characteristic: characteristic)
+            
+            // Optional: Wait briefly for the camera to process (or wait for 0xA0 notification if we wanted to be strict)
+            try? await Task.sleep(nanoseconds: 200 * 1_000_000)
+            
+            // 2. Reset Sequence
+            // Reference: Release back to focus first, then fully release
+            await sendCommand(cmdHoldFocus, to: peripheral, characteristic: characteristic)
+            try? await Task.sleep(nanoseconds: 50 * 1_000_000)
+            await sendCommand(cmdShutterReleased, to: peripheral, characteristic: characteristic)
+            
+            DispatchQueue.main.async {
+                self.statusMessage = "Ready"
+                self.isFocusLocked = false // Usually camera loses focus after shot
+            }
+        }
+    }
+    
+    func cancelCapture() {
+        guard let peripheral = connectedPeripheral, let characteristic = commandCharacteristic else { return }
+        Task {
+            await sendCommand(cmdShutterReleased, to: peripheral, characteristic: characteristic)
+            DispatchQueue.main.async {
+                self.statusMessage = "Ready"
             }
         }
     }
@@ -245,6 +253,8 @@ extension BluetoothManager: CBCentralManagerDelegate {
         commandCharacteristic = nil
         notifyCharacteristic = nil
         isReadyToCapture = false
+        isFocusLocked = false
+        pendingCapture = false
     }
 }
 
@@ -302,20 +312,21 @@ extension BluetoothManager: CBPeripheralDelegate {
                 let type = data[1]
                 let value = data[2]
                 
-                // Check if we are waiting for this specific status
-                if let condition = self.waitingForCondition, condition.type == type, condition.value == value {
-                    print("Received awaited condition: Type \(String(format:"%02X", type)), Value \(String(format:"%02X", value))")
-                    self.statusContinuation?.resume()
-                    self.statusContinuation = nil
-                    self.waitingForCondition = nil
-                }
-                
                 DispatchQueue.main.async {
                     if type == 0x3F { // Focus Status
                         if value == 0x20 {
                             print("Focus Acquired")
+                            self.isFocusLocked = true
+                            // If user already released the button, trigger capture now
+                            if self.pendingCapture {
+                                print("Pending capture triggered by Focus Lock.")
+                                if let p = self.connectedPeripheral, let c = self.commandCharacteristic {
+                                    self.performCapture(peripheral: p, characteristic: c)
+                                }
+                            }
                         } else {
-                            print("Focus Ready")
+                            print("Focus Lost/Ready")
+                            self.isFocusLocked = false
                         }
                     } else if type == 0xA0 { // Shutter Status
                         if value == 0x20 {
