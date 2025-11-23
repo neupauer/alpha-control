@@ -49,9 +49,35 @@ class BluetoothManager: NSObject, ObservableObject {
     // Sony Camera Manufacturer Data Prefix (from C++ reference: CAMERA_MANUFACTURER_LOOKUP)
     private let sonyManufacturerDataPrefix: Data = Data([0x2D, 0x01, 0x03, 0x00])
     
+    // Async Continuation for status waiting
+    private var statusContinuation: CheckedContinuation<Void, Error>?
+    private var waitingForCondition: (type: UInt8, value: UInt8)?
+    
     override init() {
         super.init()
         centralManager = CBCentralManager(delegate: self, queue: nil)
+    }
+    
+    // ... (Scan methods remain here)
+
+    private func waitForStatus(type: UInt8, value: UInt8, timeout: TimeInterval) async throws {
+        // Set the condition we are waiting for
+        self.waitingForCondition = (type, value)
+        
+        // Use a throwing continuation to wait
+        try await withCheckedThrowingContinuation { continuation in
+            self.statusContinuation = continuation
+            
+            // Timeout logic
+            Task {
+                try? await Task.sleep(nanoseconds: UInt64(timeout * 1_000_000_000))
+                if self.statusContinuation != nil {
+                    self.statusContinuation?.resume(throwing: NSError(domain: "Timeout", code: -1, userInfo: nil))
+                    self.statusContinuation = nil
+                    self.waitingForCondition = nil
+                }
+            }
+        }
     }
     
     func startScanning() {
@@ -99,30 +125,42 @@ class BluetoothManager: NSObject, ObservableObject {
         }
         
         Task {
-            // Sequence: Focus -> Capture -> Release
-            
-            // 1. Press to Focus
-            await sendCommand(cmdPressToFocus, to: peripheral, characteristic: characteristic)
-            statusMessage = "Focusing..."
-            
-            // Wait for focus (simulated delay, ideally wait for notification)
-            try? await Task.sleep(nanoseconds: 200 * 1_000_000) // 200ms
-            
-            // 2. Take Picture
-            await sendCommand(cmdTakePicture, to: peripheral, characteristic: characteristic)
-            statusMessage = "Capturing..."
-            
-            // Wait for capture
-            try? await Task.sleep(nanoseconds: 200 * 1_000_000) // 200ms
-            
-            // 3. Hold Focus (Release shutter button but keep focus? Reference does this)
-            await sendCommand(cmdHoldFocus, to: peripheral, characteristic: characteristic)
-            
-            // 4. Release Everything
-            await sendCommand(cmdShutterReleased, to: peripheral, characteristic: characteristic)
-            
-            DispatchQueue.main.async {
-                self.statusMessage = "Ready"
+            do {
+                // Sequence: Focus -> Capture -> Release
+                
+                // 1. Press to Focus
+                await sendCommand(cmdPressToFocus, to: peripheral, characteristic: characteristic)
+                DispatchQueue.main.async { self.statusMessage = "Focusing..." }
+                
+                // Wait for Focus Acquired (0x3F, 0x20)
+                try await waitForStatus(type: 0x3F, value: 0x20, timeout: 3.0)
+                
+                // 2. Take Picture
+                await sendCommand(cmdTakePicture, to: peripheral, characteristic: characteristic)
+                DispatchQueue.main.async { self.statusMessage = "Capturing..." }
+                
+                // Wait for Shutter Active (0xA0, 0x20)
+                try await waitForStatus(type: 0xA0, value: 0x20, timeout: 3.0)
+                
+                // 3. Hold Focus (Release shutter button but keep focus? Reference does this)
+                await sendCommand(cmdHoldFocus, to: peripheral, characteristic: characteristic)
+                
+                // 4. Release Everything
+                await sendCommand(cmdShutterReleased, to: peripheral, characteristic: characteristic)
+                
+                DispatchQueue.main.async {
+                    self.statusMessage = "Ready"
+                }
+            } catch {
+                print("Trigger failed or timed out: \(error)")
+                DispatchQueue.main.async {
+                    self.statusMessage = "Error/Timeout"
+                }
+                // Attempt to release anyway to reset camera state
+                await sendCommand(cmdShutterReleased, to: peripheral, characteristic: characteristic)
+                DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
+                     self.statusMessage = "Ready"
+                }
             }
         }
     }
@@ -257,12 +295,20 @@ extension BluetoothManager: CBPeripheralDelegate {
     }
     
     func peripheral(_ peripheral: CBPeripheral, didUpdateValueFor characteristic: CBCharacteristic, error: Error?) {
-        if characteristic.uuid == notifyCharacteristicUUID, let data = characteristic.value {
+        if characteristic.uuid == notifyCharacteristicUUID || characteristic.uuid.uuidString == "FF02", let data = characteristic.value {
             // Handle notifications based on reference protocol
             // Format: 0x02 [Type] [Value]
             if data.count >= 3 && data[0] == 0x02 {
                 let type = data[1]
                 let value = data[2]
+                
+                // Check if we are waiting for this specific status
+                if let condition = self.waitingForCondition, condition.type == type, condition.value == value {
+                    print("Received awaited condition: Type \(String(format:"%02X", type)), Value \(String(format:"%02X", value))")
+                    self.statusContinuation?.resume()
+                    self.statusContinuation = nil
+                    self.waitingForCondition = nil
+                }
                 
                 DispatchQueue.main.async {
                     if type == 0x3F { // Focus Status
