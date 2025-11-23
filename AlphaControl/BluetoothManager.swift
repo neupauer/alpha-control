@@ -43,6 +43,8 @@ class BluetoothManager: NSObject, ObservableObject {
     private let cmdTakePicture: UInt16 = 0x0901
     private let cmdShutterReleased: UInt16 = 0x0601
     
+    private let lastConnectedDeviceKey = "lastConnectedDeviceUUID"
+    
     override init() {
         super.init()
         centralManager = CBCentralManager(delegate: self, queue: nil)
@@ -66,17 +68,24 @@ class BluetoothManager: NSObject, ObservableObject {
     }
     
     func connect(to device: DiscoveredDevice) {
+        connect(to: device.peripheral)
+    }
+    
+    func connect(to peripheral: CBPeripheral) {
         stopScanning()
         connectionStatus = .connecting
-        connectedPeripheral = device.peripheral
+        connectedPeripheral = peripheral
         connectedPeripheral?.delegate = self
-        centralManager.connect(device.peripheral, options: nil)
+        centralManager.connect(peripheral, options: nil)
     }
     
     func disconnect() {
         if let peripheral = connectedPeripheral {
             centralManager.cancelPeripheralConnection(peripheral)
         }
+        // Optional: Clear the saved device if the user manually disconnects? 
+        // For now, we keep it remembered even if they disconnect manually, 
+        // so they can easily reconnect later.
     }
     
     func triggerShutter() {
@@ -127,6 +136,18 @@ extension BluetoothManager: CBCentralManagerDelegate {
     func centralManagerDidUpdateState(_ central: CBCentralManager) {
         if central.state == .poweredOn {
             print("Bluetooth is powered on")
+            
+            // Try to reconnect to the last known device
+            if let uuidString = UserDefaults.standard.string(forKey: lastConnectedDeviceKey),
+               let uuid = UUID(uuidString: uuidString) {
+                
+                let knownPeripherals = centralManager.retrievePeripherals(withIdentifiers: [uuid])
+                if let lastDevice = knownPeripherals.first {
+                    print("Found last connected device: \(lastDevice.name ?? "Unknown"). Reconnecting...")
+                    connect(to: lastDevice)
+                }
+            }
+            
         } else {
             print("Bluetooth is not available: \(central.state.rawValue)")
             connectionStatus = .error
@@ -144,6 +165,10 @@ extension BluetoothManager: CBCentralManagerDelegate {
     
     func centralManager(_ central: CBCentralManager, didConnect peripheral: CBPeripheral) {
         print("Connected to \(peripheral.name ?? "device")")
+        
+        // Save this device as the last connected one
+        UserDefaults.standard.set(peripheral.identifier.uuidString, forKey: lastConnectedDeviceKey)
+        
         connectionStatus = .connected
         peripheral.discoverServices([cameraServiceUUID])
     }
