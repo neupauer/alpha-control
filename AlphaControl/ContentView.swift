@@ -1,24 +1,13 @@
-//
-//  ContentView.swift
-//  AlphaControl
-//
-//  Created by Peter Neupauer on 23/11/2025.
-//
-
 import SwiftUI
 
 struct ContentView: View {
+    @StateObject var bluetoothManager = BluetoothManager()
+    
     var body: some View {
-        VStack {
-            Image(systemName: "globe")
-                .imageScale(.large)
-                .foregroundStyle(.tint)
-            Text("Hello, world!")
+        if bluetoothManager.connectionStatus == .connected {
+            CameraControlView(bluetoothManager: bluetoothManager)
+        } else {
+            DeviceListView(bluetoothManager: bluetoothManager)
         }
-        .padding()
     }
-}
-
-#Preview {
-    ContentView()
 }
