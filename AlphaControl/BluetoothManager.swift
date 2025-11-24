@@ -27,6 +27,7 @@ class BluetoothManager: NSObject, ObservableObject {
     @Published var discoveredDevices: [DiscoveredDevice] = []
     @Published var isReadyToCapture: Bool = false
     @Published var statusMessage: String = "Disconnected"
+    @Published var connectedDeviceName: String? = nil
     
     private var centralManager: CBCentralManager!
     private var connectedPeripheral: CBPeripheral?
@@ -238,6 +239,7 @@ extension BluetoothManager: CBCentralManagerDelegate {
         UserDefaults.standard.set(peripheral.identifier.uuidString, forKey: lastConnectedDeviceKey)
         
         connectionStatus = .connected
+        connectedDeviceName = peripheral.name ?? "Unknown Camera"
         peripheral.discoverServices([cameraServiceUUID])
     }
     
@@ -249,6 +251,7 @@ extension BluetoothManager: CBCentralManagerDelegate {
     func centralManager(_ central: CBCentralManager, didDisconnectPeripheral peripheral: CBPeripheral, error: Error?) {
         print("Disconnected")
         connectionStatus = .disconnected
+        connectedDeviceName = nil
         connectedPeripheral = nil
         commandCharacteristic = nil
         notifyCharacteristic = nil

@@ -2,20 +2,47 @@ import SwiftUI
 
 struct DeviceListView: View {
     @ObservedObject var bluetoothManager: BluetoothManager
-    @State private var isShowingConnectionSheet = false
+    @Binding var isPresented: Bool
     
     var body: some View {
         NavigationView {
             List {
-                Section(header: Text("Devices")) {
+                if let connectedName = bluetoothManager.connectedDeviceName, bluetoothManager.connectionStatus == .connected {
+                    Section(header: Text("Connected Device")) {
+                        HStack {
+                            Text(connectedName)
+                                .font(.headline)
+                                .foregroundColor(.green)
+                            Spacer()
+                            Button("Disconnect") {
+                                bluetoothManager.disconnect()
+                            }
+                            .foregroundColor(.red)
+                            .buttonStyle(BorderedButtonStyle())
+                        }
+                    }
+                }
+                
+                Section(header: Text("Discovered Devices")) {
                     if bluetoothManager.discoveredDevices.isEmpty {
-                        Text("No devices found")
-                            .foregroundColor(.gray)
+                        if bluetoothManager.connectionStatus == .scanning {
+                            HStack {
+                                Spacer()
+                                ProgressView()
+                                    .padding(.trailing, 10)
+                                Text("Scanning...")
+                                    .foregroundColor(.gray)
+                                Spacer()
+                            }
+                        } else {
+                            Text("No devices found")
+                                .foregroundColor(.gray)
+                        }
                     } else {
                         ForEach(bluetoothManager.discoveredDevices) { device in
                             Button(action: {
                                 bluetoothManager.connect(to: device)
-                                isShowingConnectionSheet = true
+                                isPresented = false
                             }) {
                                 HStack {
                                     Text(device.name)
@@ -32,33 +59,28 @@ struct DeviceListView: View {
                     }
                 }
             }
-            .navigationTitle("Scanner")
+            .navigationTitle("Cameras")
             .toolbar {
                 ToolbarItem(placement: .navigationBarTrailing) {
                     if bluetoothManager.connectionStatus == .scanning {
-                        ProgressView()
+                        Button("Stop") {
+                            bluetoothManager.stopScanning()
+                        }
                     } else {
                         Button("Scan") {
                             bluetoothManager.startScanning()
                         }
                     }
                 }
+                ToolbarItem(placement: .navigationBarLeading) {
+                    Button("Close") {
+                        isPresented = false
+                    }
+                }
             }
             .onAppear {
-                bluetoothManager.startScanning()
-            }
-            .sheet(isPresented: $isShowingConnectionSheet) {
-                ConnectionStatusSheetView(bluetoothManager: bluetoothManager)
-            }
-            .onChange(of: bluetoothManager.connectionStatus) { newStatus in
-                // Automatically dismiss the sheet if connected, or after a delay if disconnected/error
-                if newStatus == .connected {
-                    isShowingConnectionSheet = false // ContentView will handle navigation
-                } else if newStatus == .disconnected || newStatus == .error {
-                    // Give user time to see the status, then dismiss
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
-                        isShowingConnectionSheet = false
-                    }
+                if bluetoothManager.connectionStatus != .connected {
+                    bluetoothManager.startScanning()
                 }
             }
         }
